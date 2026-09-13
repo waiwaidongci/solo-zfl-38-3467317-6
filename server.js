@@ -1,7 +1,7 @@
 import http from "node:http";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, basename, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   snapshotFromItem,
@@ -58,17 +58,24 @@ class HttpError extends Error {
   }
 }
 
+let tmpFileSeq = 0;
+// 原子写入：先写同目录临时文件再 rename，并发读永远不会拿到写了一半的 JSON
+async function atomicWriteJson(file, text) {
+  const tmp = join(dirname(file), "." + basename(file) + "." + process.pid + "." + (tmpFileSeq++) + ".tmp");
+  await writeFile(tmp, text);
+  await rename(tmp, file);
+}
 async function loadDb() {
   if (!existsSync(dbPath)) {
     await mkdir(dirname(dbPath), { recursive: true });
-    await writeFile(dbPath, JSON.stringify(seed, null, 2));
+    await atomicWriteJson(dbPath, JSON.stringify(seed, null, 2));
   }
   const db = JSON.parse(await readFile(dbPath, "utf8"));
   db.items ||= [];
   db.plans ||= {};
   return db;
 }
-async function saveDb(db) { await writeFile(dbPath, JSON.stringify(db, null, 2)); }
+async function saveDb(db) { await atomicWriteJson(dbPath, JSON.stringify(db, null, 2)); }
 
 // 串行化所有写操作：加载→修改→保存作为一个整体排队执行，
 // 避免并发请求互相覆盖（版本过期/并发修改的服务端兜底）。
@@ -92,7 +99,12 @@ function html(res, text) {
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
   res.end(text);
 }
-function newId() { return "MR-" + Date.now(); }
+let idSeq = 0;
+// 并发安全编号：36 进制时间戳 + 进程内自增序号 + 随机后缀，同毫秒并行建档也不重复
+function newId(prefix = "MR") {
+  idSeq = (idSeq + 1) % 46656; // 36^3
+  return prefix + "-" + Date.now().toString(36) + idSeq.toString(36).padStart(3, "0") + Math.random().toString(36).slice(2, 4);
+}
 function computeStats(items) {
   const stats = Object.fromEntries(statLabels.map(label => [label, 0]));
   for (const item of items) {
