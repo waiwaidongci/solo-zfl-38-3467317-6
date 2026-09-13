@@ -4,6 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test test/",
+    "test:browser": "node --test test/browser.test.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.63.0"
   }
 }

@@ -20,3 +20,6 @@ Thumbs.db
 
 .vscode/
 .idea/
+
+# 本地浏览器运行库（scripts/setup-browser.sh 生成）
+.browser-libs/
