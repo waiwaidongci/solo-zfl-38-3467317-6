@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 
 const execFileP = promisify(execFile);
 const tmp = await mkdtemp(join(tmpdir(), "rigging-test-"));
-process.env.DB_PATH = join(tmp, "db.json");
+const dbPath = join(tmp, "db.json");
 
 const { createApp } = await import("../server.js");
 
@@ -26,7 +26,7 @@ const post = (path, body) => api(path, { method: "POST", body: JSON.stringify(bo
 const patch = (path, body) => api(path, { method: "PATCH", body: JSON.stringify(body || {}) });
 
 async function startServer() {
-  server = createApp();
+  server = createApp({ dbPath });
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   base = `http://127.0.0.1:${server.address().port}`;
 }

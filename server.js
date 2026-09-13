@@ -13,7 +13,7 @@ import {
 } from "./lib/plans.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const dbPath = process.env.DB_PATH || join(__dirname, "data", "model-rigging-calibration.json");
+const defaultDbPath = process.env.DB_PATH || join(__dirname, "data", "model-rigging-calibration.json");
 const port = Number(process.env.PORT || 3038);
 const seed = {
   "items": [
@@ -64,26 +64,6 @@ async function atomicWriteJson(file, text) {
   const tmp = join(dirname(file), "." + basename(file) + "." + process.pid + "." + (tmpFileSeq++) + ".tmp");
   await writeFile(tmp, text);
   await rename(tmp, file);
-}
-async function loadDb() {
-  if (!existsSync(dbPath)) {
-    await mkdir(dirname(dbPath), { recursive: true });
-    await atomicWriteJson(dbPath, JSON.stringify(seed, null, 2));
-  }
-  const db = JSON.parse(await readFile(dbPath, "utf8"));
-  db.items ||= [];
-  db.plans ||= {};
-  return db;
-}
-async function saveDb(db) { await atomicWriteJson(dbPath, JSON.stringify(db, null, 2)); }
-
-// 串行化所有写操作：加载→修改→保存作为一个整体排队执行，
-// 避免并发请求互相覆盖（版本过期/并发修改的服务端兜底）。
-let writeQueue = Promise.resolve();
-function enqueueWrite(fn) {
-  const run = writeQueue.then(fn, fn);
-  writeQueue = run.then(() => {}, () => {});
-  return run;
 }
 
 async function body(req) {
@@ -210,7 +190,7 @@ function buildPreview(item, bucket, branch, targetVersionId) {
   };
 }
 
-async function handlePlans(req, res, url, itemKey, rest, db) {
+async function handlePlans(ctx, req, res, url, itemKey, rest, db) {
   const seg = rest.split("/").filter(Boolean);
 
   if (seg.length === 0 && req.method === "GET") {
@@ -235,8 +215,8 @@ async function handlePlans(req, res, url, itemKey, rest, db) {
   // 固化当前帆索/目标松紧/依赖/校准状态为一个不可覆盖的计划版本
   if (seg[0] === "versions" && seg.length === 1 && req.method === "POST") {
     const input = await body(req);
-    const version = await enqueueWrite(async () => {
-      const fresh = await loadDb();
+    const version = await ctx.enqueueWrite(async () => {
+      const fresh = await ctx.loadDb();
       const item = findItem(fresh, itemKey);
       if (!item) throw new HttpError(404, { error: "item_not_found" });
       const bucket = bucketOf(fresh, item);
@@ -257,7 +237,7 @@ async function handlePlans(req, res, url, itemKey, rest, db) {
         snapshot
       };
       bucket.versions.push(v);
-      await saveDb(fresh);
+      await ctx.saveDb(fresh);
       return v;
     });
     return send(res, 201, version);
@@ -275,8 +255,8 @@ async function handlePlans(req, res, url, itemKey, rest, db) {
   // 从任一版本开分支修改
   if (seg[0] === "versions" && seg.length === 3 && seg[2] === "branch" && req.method === "POST") {
     const input = await body(req);
-    const branch = await enqueueWrite(async () => {
-      const fresh = await loadDb();
+    const branch = await ctx.enqueueWrite(async () => {
+      const fresh = await ctx.loadDb();
       const item = findItem(fresh, itemKey);
       if (!item) throw new HttpError(404, { error: "item_not_found" });
       const bucket = bucketOf(fresh, item);
@@ -298,7 +278,7 @@ async function handlePlans(req, res, url, itemKey, rest, db) {
         draft: normalizeSnapshot(v.snapshot)
       };
       bucket.branches.push(b);
-      await saveDb(fresh);
+      await ctx.saveDb(fresh);
       return b;
     });
     return send(res, 201, branch);
@@ -323,8 +303,8 @@ async function handlePlans(req, res, url, itemKey, rest, db) {
   // 修改分支草稿（仅结构错误即时报错，循环/缺失留待合并校验）
   if (seg[0] === "branches" && seg.length === 2 && req.method === "PATCH") {
     const input = await body(req);
-    const branch = await enqueueWrite(async () => {
-      const fresh = await loadDb();
+    const branch = await ctx.enqueueWrite(async () => {
+      const fresh = await ctx.loadDb();
       const item = findItem(fresh, itemKey);
       if (!item) throw new HttpError(404, { error: "item_not_found" });
       const bucket = bucketOf(fresh, item);
@@ -345,7 +325,7 @@ async function handlePlans(req, res, url, itemKey, rest, db) {
         b.draft.lines = lines;
       }
       b.updatedAt = new Date().toISOString();
-      await saveDb(fresh);
+      await ctx.saveDb(fresh);
       return b;
     });
     return send(res, 200, { ...branch, warnings: validateSnapshot(branch.draft) });
@@ -367,8 +347,8 @@ async function handlePlans(req, res, url, itemKey, rest, db) {
   // 执行合并：服务端重新校验，拒绝时不落库、活动任务保持原样
   if (seg[0] === "branches" && seg.length === 3 && seg[2] === "merge" && req.method === "POST") {
     const input = await body(req);
-    const result = await enqueueWrite(async () => {
-      const fresh = await loadDb();
+    const result = await ctx.enqueueWrite(async () => {
+      const fresh = await ctx.loadDb();
       const item = findItem(fresh, itemKey);
       if (!item) throw new HttpError(404, { error: "item_not_found" });
       const bucket = bucketOf(fresh, item);
@@ -416,7 +396,7 @@ async function handlePlans(req, res, url, itemKey, rest, db) {
         affected: preview.affected
       };
       bucket.merges.push(rec);
-      await saveDb(fresh);
+      await ctx.saveDb(fresh);
       return { version: v, merge: rec, affected: preview.affected };
     });
     return send(res, 201, result);
@@ -809,37 +789,37 @@ function page() {
 </html>`;
 }
 
-async function handler(req, res) {
+async function handler(ctx, req, res) {
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
     if (req.method === "GET" && url.pathname === "/") return html(res, page());
-    const db = await loadDb();
+    const db = await ctx.loadDb();
     if (req.method === "GET" && url.pathname === "/api/items") return send(res, 200, db.items.map(summarize));
     if (req.method === "POST" && url.pathname === "/api/items") {
       const input = await body(req);
-      const item = await enqueueWrite(async () => {
-        const fresh = await loadDb();
+      const item = await ctx.enqueueWrite(async () => {
+        const fresh = await ctx.loadDb();
         const it = { id: newId(), ...input, logs: [{ at: new Date().toISOString(), step: "建档", note: "创建模型" }] };
         it.tasks = [];
         fresh.items.unshift(it);
-        await saveDb(fresh);
+        await ctx.saveDb(fresh);
         return it;
       });
       return send(res, 201, item);
     }
     const plans = url.pathname.match(/^\/api\/items\/([^/]+)\/plans(?:\/(.*))?$/);
-    if (plans) return await handlePlans(req, res, url, decodeURIComponent(plans[1]), plans[2] || "", db);
+    if (plans) return await handlePlans(ctx, req, res, url, decodeURIComponent(plans[1]), plans[2] || "", db);
     const patch = url.pathname.match(/^\/api\/items\/([^/]+)$/);
     if (patch && req.method === "PATCH") {
       const input = await body(req);
-      const item = await enqueueWrite(async () => {
-        const fresh = await loadDb();
+      const item = await ctx.enqueueWrite(async () => {
+        const fresh = await ctx.loadDb();
         const it = fresh.items.find(x => x.id === patch[1] || x.code === patch[1]);
         if (!it) throw new HttpError(404, { error: "item_not_found" });
         Object.assign(it, input);
         it.logs ||= [];
         it.logs.push({ at: new Date().toISOString(), step: "状态", note: "更新为" + it.status });
-        await saveDb(fresh);
+        await ctx.saveDb(fresh);
         return it;
       });
       return send(res, 200, item);
@@ -847,13 +827,13 @@ async function handler(req, res) {
     const log = url.pathname.match(/^\/api\/items\/([^/]+)\/logs$/);
     if (log && req.method === "POST") {
       const input = await body(req);
-      const item = await enqueueWrite(async () => {
-        const fresh = await loadDb();
+      const item = await ctx.enqueueWrite(async () => {
+        const fresh = await ctx.loadDb();
         const it = fresh.items.find(x => x.id === log[1] || x.code === log[1]);
         if (!it) throw new HttpError(404, { error: "item_not_found" });
         it.logs ||= [];
         it.logs.push({ at: new Date().toISOString(), step: input.step || "记录", note: input.note || "" });
-        await saveDb(fresh);
+        await ctx.saveDb(fresh);
         return it;
       });
       return send(res, 201, item);
@@ -861,16 +841,16 @@ async function handler(req, res) {
     const action = url.pathname.match(/^\/api\/items\/([^/]+)\/action$/);
     if (action && req.method === "POST") {
       const input = await body(req);
-      const item = await enqueueWrite(async () => {
-        const fresh = await loadDb();
+      const item = await ctx.enqueueWrite(async () => {
+        const fresh = await ctx.loadDb();
         const it = fresh.items.find(x => x.id === action[1] || x.code === action[1]);
         if (!it) throw new HttpError(404, { error: "item_not_found" });
         it.logs ||= [];
         it.tasks ||= [];
-        it.tasks.push({ id: "T-" + Date.now(), position: input.position, tension: input.tension, status: "待检查", logs: [{ at: new Date().toISOString(), note: input.note || "新增帆索任务" }] });
+        it.tasks.push({ id: newId("T"), position: input.position, tension: input.tension, status: "待检查", logs: [{ at: new Date().toISOString(), note: input.note || "新增帆索任务" }] });
         it.status = "校准中";
         it.logs.push({ at: new Date().toISOString(), step: "帆索", note: input.position + " · " + input.tension });
-        await saveDb(fresh);
+        await ctx.saveDb(fresh);
         return it;
       });
       return send(res, 201, item);
@@ -883,11 +863,33 @@ async function handler(req, res) {
   }
 }
 
-export function createApp() {
-  return http.createServer(handler);
+export function createApp(options = {}) {
+  const dbPath = options.dbPath || defaultDbPath;
+  async function loadDb() {
+    if (!existsSync(dbPath)) {
+      await mkdir(dirname(dbPath), { recursive: true });
+      await atomicWriteJson(dbPath, JSON.stringify(seed, null, 2));
+    }
+    const db = JSON.parse(await readFile(dbPath, "utf8"));
+    db.items ||= [];
+    db.plans ||= {};
+    return db;
+  }
+  async function saveDb(db) { await atomicWriteJson(dbPath, JSON.stringify(db, null, 2)); }
+  // 串行化所有写操作：加载→修改→保存作为一个整体排队执行，
+  // 避免并发请求互相覆盖（版本过期/并发修改的服务端兜底）。
+  let writeQueue = Promise.resolve();
+  function enqueueWrite(fn) {
+    const run = writeQueue.then(fn, fn);
+    writeQueue = run.then(() => {}, () => {});
+    return run;
+  }
+  const ctx = { dbPath, loadDb, saveDb, enqueueWrite };
+  return http.createServer((req, res) => handler(ctx, req, res));
 }
 
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 if (isMain) {
-  createApp().listen(port, () => console.log("古船模型帆索校准 listening on http://localhost:" + port));
+  const server = createApp();
+  server.listen(port, () => console.log("古船模型帆索校准 listening on http://localhost:" + server.address().port));
 }

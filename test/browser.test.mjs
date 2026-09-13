@@ -32,14 +32,13 @@ function launchEnv() {
 }
 
 const tmp = await mkdtemp(join(tmpdir(), "rigging-browser-"));
-process.env.DB_PATH = join(tmp, "db.json");
 const { createApp } = await import("../server.js");
 
 test("真实浏览器走通：旧流程、分支、冲突、成功合并", async t => {
   if (!chromium) {
     return t.skip("未安装 playwright/浏览器（当前环境离线）。有网环境执行 npm i -D playwright && npx playwright install chromium 后运行 npm run test:browser");
   }
-  const server = createApp();
+  const server = createApp({ dbPath: join(tmp, "db.json") });
   await new Promise(r => server.listen(0, "127.0.0.1", r));
   const base = `http://127.0.0.1:${server.address().port}`;
   const browser = await chromium.launch({ env: launchEnv() });
